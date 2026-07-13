@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+
+# OS
+.DS_Store
+
+# Claude Code local settings (machine-specific, not shared)
+.claude/settings.local.json
+
+# Generated test data and pipeline outputs (large, fully regenerable via
+# scripts/make_test_data.py + scripts/run_pipeline.py; also where real fab
+# data would land -- must never be committed)
+data/
+runs/
+*.npy
+*.npz
