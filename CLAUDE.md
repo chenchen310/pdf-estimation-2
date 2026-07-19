@@ -34,6 +34,14 @@ The user communicates in Traditional Chinese and has asked to be *asked* about u
 
 # Real-vs-synthetic acceptance test (target: CV AUC ~ 0.5)
 .venv/bin/python scripts/turing_test.py --run-dir runs/sim650 --synth-dir data/synth
+
+# --- GDS -> BBP (die-to-database) pipeline ---
+# Simulated stand-in data (FID_*_bbp.npy + FID_*_{OD,POLY}.npy design rasters)
+.venv/bin/python scripts/make_gds_test_data.py --out data/gds_sim --n-layouts 16 --dies 4 --seed 0
+# Stage-0 calibration (works identically on converted real fab data)
+.venv/bin/python scripts/run_d2db.py --data-dir data/gds_sim --out-dir runs/gds_sim --split die
+# Held-out D2DB scoring (z-maps, nuisance vs tau; uses truth/ only if present)
+.venv/bin/python scripts/evaluate_d2db.py --run-dir runs/gds_sim --data-dir data/gds_sim --set test
 ```
 
 There is no unit-test suite. Verification is end-to-end: generate sim data → run pipeline → `evaluate_sim.py` (the pipeline never reads `truth/`; the simulator in `sim/` deliberately uses its own 6x-oversampled optical chain so the estimator can't "cheat"). For a quick smoke loop use a small set:
@@ -60,6 +68,17 @@ Stage flow in `run_pipeline.py`, one module per stage in `psfest/`:
 The run directory is the contract between scripts: `run_pipeline.py` writes `config.json`, `psf.npz`, `noise_model.npz`, `events.csv`, `run_summary.json` (clean-pair ids + strength distribution), `hot_map.npz`; `run_synth.py` and `turing_test.py` consume only these.
 
 All optics-derived quantities (cutoff = 2NA/λ_min = 0.3 cyc/px here, FWHM, window radius, min separation) come from `PipelineConfig.optics` — changing optical mode means a new config JSON, never edited constants.
+
+## GDS → BBP (die-to-database) pipeline — `d2db/` + `sim/simulate_gds.py`
+
+Purpose: predict the BBP frame from GDS layer rasters so the prediction can serve as a die-to-database reference. Physics premise: every drawn feature is deep sub-resolution (min pitch < 20 nm vs ~100 nm resolvable limit), so the image only carries locally averaged effective reflectance → Stage-0 model is *linear* in band-limited region densities: `Y ≈ g·Σ_k w_k·D_k(t, σx) + b`.
+
+- Data contract (real fab data must be converted to this): `FID_{i:05d}_bbp.npy` (uint16 256×256) + `FID_{i:05d}_{LAYER}.npy` per layer (2048×2048 area-coverage raster at pixel_nm/8 = 3.75 nm; uint8 0..255, binary, or float 0..1 all accepted — the loader normalizes and records the convention). Layer set is config-driven (`D2DBConfig.layer_names`, auto-discovered from filenames by default) — other stations bring other layers.
+- Regions = Boolean layer combos × orientation class (iso/h/v from the summed structure tensor). Orientation splitting exists because VN polarization makes dense sub-λ gratings anisotropic. Rare combos (area < `min_region_area`) are dropped and their pixels masked+flagged, never silently extrapolated.
+- `calibrate.py` alternates: global LS for `w` ↔ per-frame robust gain/offset (σ-clip; real defects must not bias the fit) ↔ per-frame registration ↔ one shared Gaussian kernel inflation σx (golden search). Hi-res blurs are cached in `<run>/cache/` (auto-invalidated on config change; safe to delete).
+- **Registration uses high-passed cross-correlation + parabolic peak interpolation (`_cc_shift`), NOT `measure_shift`** — with all pattern sub-resolution, gradient energy sits on sparse macro-boundary pixels and falls below LK's noise eigenvalue floor (this failure was observed). Pattern-invariant directions give a flat CC ridge → no refinement, same graceful behavior as LK.
+- Evaluation (`evald2db.py`) mirrors production: model frozen, only (g, b, t) fitted per frame; z = resid/σ_noise with σ_noise measured per-pixel from the frame's own out-of-band spectrum (> 0.42 cyc/px there is only sensor noise). Headline numbers: nuisance rate vs τ and (sim only) area fraction with σ_model < σ_noise.
+- `sim/simulate_gds.py` is deliberately richer than the estimator (Abbe partial coherence over an ECP-*like* annular source — the real ECP pupil geometry is unavailable —, complex per-material reflectance with per-die film drift and focus jitter, CD bias/pullback/corner rounding vs the saved design rasters, VN anisotropy surrogate). Known consequence: phase-step edges under defocus shift the apparent intensity edge; Stage 0 absorbs it as a per-frame translation, so the sim registration-vs-truth check reads ~0.1 px on amplitude-contrast layouts but up to ~1.5 px on phase-contrast-dominated ones. That is a Stage-1 (complex reflectance / partial coherence) target, not a registration bug.
 
 ## Conventions that are easy to break
 
